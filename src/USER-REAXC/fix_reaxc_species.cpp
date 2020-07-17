@@ -25,6 +25,7 @@
 #include "domain.h"
 #include "update.h"
 #include "modify.h"
+#include "fix_store.h"
 #include "neighbor.h"
 #include "neigh_list.h"
 #include "comm.h"
@@ -33,6 +34,8 @@
 #include "error.h"
 #include "pair_reaxc.h"
 #include "reaxc_defs.h"
+#include "group.h"
+#include "delete_atoms.h"
 
 using namespace LAMMPS_NS;
 using namespace FixConst;
@@ -55,6 +58,8 @@ FixReaxCSpecies::FixReaxCSpecies(LAMMPS *lmp, int narg, char **arg) :
   peratom_freq = 1;
 
   nvalid = -1;
+     
+  delvol = 0;
 
   MPI_Comm_rank(world,&me);
   MPI_Comm_size(world,&nprocs);
@@ -219,6 +224,14 @@ FixReaxCSpecies::FixReaxCSpecies(LAMMPS *lmp, int narg, char **arg) :
         multipos = 0;
       }
       iarg += 3;
+       
+      // Light molecule (volatile) deletion
+    } else if (strcmp(arg[iarg],"delete") == 0){
+      if (iarg+3 > narg) error->all(FLERR,"Illegal fix reax/c/species command");
+      delvol = 1;
+      mwcutoff = atof(arg[iarg+1]); //molecular weight cutoff for volatile deletion
+      tavcut = atoi(arg[iarg+2]);   //Time as volatile cutoff for volatile deletion
+      iarg += 3;
     } else error->all(FLERR,"Illegal fix reax/c/species command");
   }
 
@@ -236,6 +249,39 @@ FixReaxCSpecies::FixReaxCSpecies(LAMMPS *lmp, int narg, char **arg) :
   vector_nmole = 0;
   vector_nspec = 0;
 
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixReaxCSpecies::post_constructor()
+{
+  //Create FixStore instance to store per-atom property "time as volatile" for volatile deletion.
+  if (delvol == 0) return;
+  id_fix_vol = NULL;
+
+  int nnn = strlen(id) + strlen("_FIX_STORE_VOL") + 1;
+  id_fix_vol = new char[nnn];
+  strcpy(id_fix_vol,id);
+  strcat(id_fix_vol,"_FIX_STORE_VOL");
+
+  char **newarg = new char*[6];
+  newarg[0] = id_fix_vol;
+  newarg[1] = "all";
+  newarg[2] = (char *) "STORE";
+  newarg[3] = (char *) "peratom";
+  newarg[4] = (char *) "1";
+  newarg[5] = (char *) "1";
+  modify->add_fix(6,newarg);
+  delete [] newarg;
+  fix_vol = (FixStore *) modify->fix[modify->nfix-1];
+
+  delAtoms = new DeleteAtoms(lmp);
+
+  volDel = NULL;
+  mvoldel = NULL;
+  mweight = NULL;
+  tav = NULL;
+  nats = NULL;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -468,6 +514,8 @@ void FixReaxCSpecies::Output_ReaxC_Bonds(bigint ntimestep, FILE * /*fp*/)
   SortMolecule (Nmole);
 
   FindSpecies(Nmole, Nspec);
+
+  if (delvol == 1) MolWeight(Nmole, Nspec);
 
   vector_nmole = Nmole;
   vector_nspec = Nspec;
@@ -711,6 +759,140 @@ void FixReaxCSpecies::FindSpecies(int Nmole, int &Nspec)
   memory->destroy(MolType);
   MolType = NULL;
   memory->create(MolType,Nspec*(ntypes+2),"reax/c/species:MolType");
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixReaxCSpecies::MolWeight(int Nmole, int Nspec)
+{
+  int i, k, l, m, n, cid, itype;
+  int *mask = atom->mask;
+  int found_volDel = 0;
+  int fvD = 0;
+
+  double *mwcounter = fix_vol->vstore;
+
+  memory->destroy(volDel);
+  memory->destroy(mvoldel);
+  memory->destroy(mweight);
+  memory->destroy(tav);
+  memory->destroy(nats);
+  volDel = NULL;
+  mvoldel = NULL;
+  mweight = NULL;
+  tav = NULL;
+  nats = NULL;
+
+  //Initialize all per-atom volatile deletion flags to false
+  memory->create(volDel,nlocal,"reax/c/species:volDel");
+  for (i = 0; i < nlocal; i++){
+    volDel[i] = 0;
+  }
+
+  //Initialize molecular weights, and other per-molecule properties to zero.
+  memory->create(mweight,Nmole,"reax/c/species:mweight");
+  memory->create(tav,Nmole,"reax/c/species:tav");
+  memory->create(nats,Nmole,"reax/c/species:nats");
+  memory->create(mvoldel,Nmole,"reax/c/species:mvoldel");
+  for (m = 1; m <= Nmole; m ++){
+    mweight[m-1] = 0.0;
+    tav[m-1] = 0.0;
+    nats[m-1] = 0.0;
+    mvoldel[m-1] = 0;
+  }
+
+  //Loop over molecules, nested loop over atoms. Compute molecular weights and molecular time as volatile.
+  for (m = 1; m <= Nmole; m ++) {
+    for (i = 0; i < nlocal; i ++) {
+      if (!(mask[i] & groupbit)) continue;
+      cid = nint(clusterID[i]);
+      if (cid == m) {
+        mweight[m-1] += atom->mass[atom->type[i]];
+
+        tav[m-1] += mwcounter[i];
+        nats[m-1] += 1.0;
+      }
+    }
+  }
+
+  //Ensure that all cores have the correct molecular weights, time as volatie, as well as number of atoms per molecule.
+  double *mweightall, *natsall, *tavall;
+  memory->create(mweightall,Nmole,"reax/c/species:mweightall");
+  memory->create(natsall,Nmole,"reax/c/species:natsall");
+  memory->create(tavall,Nmole,"reax/c/species:tavall");
+  MPI_Allreduce(mweight,mweightall,Nmole,MPI_DOUBLE,MPI_SUM,world);
+  MPI_Allreduce(nats,natsall,Nmole,MPI_DOUBLE,MPI_SUM,world);
+  MPI_Allreduce(tav,tavall,Nmole,MPI_DOUBLE,MPI_SUM,world);
+
+  //Increment the volatile counter for all molecules below the molecular weight cutoff and evaluate the average "time as volatile"
+  //per molecule. If this number is above a cutoff time, delete the whole molecule.
+  for (i = 0; i < nlocal; i++){
+    //Set all per-atom time as volatile counter variables to that value averaged over all atoms in the molecule.
+    mwcounter[i] = tavall[nint(clusterID[i])-1]/natsall[nint(clusterID[i])-1];
+
+    if (mweightall[nint(clusterID[i])-1] < mwcutoff){
+      mwcounter[i] += 1.0;
+      tav[nint(clusterID[i])-1] += 1.0;
+    } else {
+      if (mwcounter[i] > 0.0){
+        mwcounter[i] -= 1.0;
+        tav[nint(clusterID[i])-1] -= 1.0;
+      } else mwcounter[i] = 0.0;
+    }
+  }
+
+  //Ensure that all cores have the correct time as volatile per molecule
+  MPI_Allreduce(tav,tavall,Nmole,MPI_DOUBLE,MPI_SUM,world);
+
+  //Flag all molecules with an average time as volatile per atom greater than some number for deletion
+  for (m = 1; m <= Nmole; m++){
+    //fprintf(screen, "Time as volatile = %e, natoms = %e, molecule id = %i, time as volatile = %e\n",tavall[m-1], natsall[m-1], m-1, tavall[m-1]/natsall[m-1]);
+    if (nfreq*tavall[m-1]/natsall[m-1] > tavcut){
+      mvoldel[m-1] = 1;
+      if (me == 0) fprintf(screen,"Deleting molecule %i with molecular weight %.3f \n",m-1,mweightall[m-1]);
+    }
+  }
+
+  memory->destroy(mweightall);
+  memory->destroy(tavall);
+  memory->destroy(natsall);
+
+  //Flag all atoms that are in flagged molecules for deletion
+  for (i = 0; i < nlocal; i++){
+    if (mvoldel[nint(clusterID[i])-1] > 0){
+      found_volDel = 1;
+      volDel[i] = 1;
+    }
+  }
+
+  //If one core invokes delete atoms, they all should, even if they don't have any atoms to delete, because
+  //delete atoms has an AllReduce, which contains an MPI_Barrier, so if they all don't run the same code,
+  //the program will hang. Doing AllReduce here will sum the value of found_volDel for all cores, and then
+  //each core can check if any other cores have found volatiles.
+  MPI_Allreduce(&found_volDel,&fvD,1,MPI_INT,MPI_SUM,world);
+
+  //Delete flagged atoms.
+  if (fvD > 0){
+    group->create("volDel", volDel);
+    char **arg2 = new char*[2];
+    arg2[0] = (char *) "group";
+    arg2[1] = (char *) "volDel";
+    delAtoms->command(2,arg2);
+  }
+
+  found_volDel = 0;
+  fvD = 0;
+
+  memory->destroy(volDel);
+  memory->destroy(mvoldel);
+  memory->destroy(mweight);
+  memory->destroy(tav);
+  memory->destroy(nats);
+  volDel = NULL;
+  mvoldel = NULL;
+  mweight = NULL;
+  tav = NULL;
+  nats = NULL;
 }
 
 /* ---------------------------------------------------------------------- */
