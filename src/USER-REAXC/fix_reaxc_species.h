@@ -35,18 +35,26 @@ class FixReaxCSpecies : public Fix {
   FixReaxCSpecies(class LAMMPS *, int, char **);
   virtual ~FixReaxCSpecies();
   int setmask();
+  void post_constructor();
   virtual void init();
   void init_list(int, class NeighList *);
   void setup(int);
   void post_integrate();
   double compute_vector(int);
-
+   
+ private:
+  char *id_fix_vol;
+  class FixStore *fix_vol;
+   
  protected:
-  int me, nprocs, nmax, nlocal, ntypes, ntotal;
-  int nrepeat, nfreq, posfreq;
+  int me, nprocs, nmax, nlocal, ntypes, ntotal, delvol;
+  int nrepeat, nfreq, posfreq, tavcut;
   int Nmoltype, vector_nmole, vector_nspec;
-  int *Name, *MolName, *NMol, *nd, *MolType, *molmap;
-  double *clusterID;
+  int *Name, *MolName, *NMol, *nd, *MolType, *molmap, *volDel, *mvoldel;
+  double *clusterID, *mweight; //Per-atom cluster ID and per-molecule molecular weight
+  double *tav, *nats;   //time as volatile and number of atoms per molecule
+  double mwcutoff;  //Molecular weight cutoff for volatile deletion
+   
   AtomCoord *x0;
 
   double bg_cut;
@@ -58,6 +66,8 @@ class FixReaxCSpecies : public Fix {
   int singlepos_opened, multipos_opened;
   char *ele, **eletype, *filepos;
 
+  class DeleteAtoms *delAtoms;
+
   void Output_ReaxC_Bonds(bigint, FILE *);
   void create_compute();
   void create_fix();
@@ -66,6 +76,7 @@ class FixReaxCSpecies : public Fix {
   void SortMolecule(int &);
   void FindSpecies(int, int &);
   void WriteFormulas(int, int);
+  void MolWeight(int, int);
   int CheckExistence(int, int);
 
   int nint(const double &);
