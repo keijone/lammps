@@ -20,7 +20,7 @@ Syntax
 * Nfreq = calculate average bond-order every this many timesteps
 * filename = name of output file
 * zero or more keyword/value pairs may be appended
-* keyword = *cutoff* or *element* or *position*
+* keyword = *cutoff* or *element* or *position* or *delete*
 
   .. parsed-literal::
 
@@ -29,8 +29,11 @@ Syntax
          Cutoff = Bond-order cutoff value for this pair of atom types
        *element* value = Element1, Element2, ...
        *position* value = posfreq filepos
-         posfreq = write position files every this many timestep
+         posfreq = write position files every this many timesteps
          filepos = name of position output file
+       *delete* value = mwcutoff TAVcutoff
+         mwcutoff = upper molecular weight cutoff
+         TAVcutoff = delete molecules below mwcutoff after this many timesteps
 
 Examples
 """"""""
@@ -40,6 +43,7 @@ Examples
    fix 1 all reax/c/species 10 10 100 species.out
    fix 1 all reax/c/species 1 2 20 species.out cutoff 1 1 0.40 cutoff 1 2 0.55
    fix 1 all reax/c/species 1 100 100 species.out element Au O H position 1000 AuOH.pos
+   fix 1 all reax/c/species 10 10 100 species.reax element H C O delete 110.0 1000
 
 Description
 """""""""""
@@ -92,6 +96,10 @@ file.  It can contain the wildcard character "\*".  If the "\*"
 character appears in *filepos*\ , then one file per snapshot is written
 at *posfreq* and the "\*" character is replaced with the timestep
 value.  For example, AuO.pos.\* becomes AuO.pos.0, AuO.pos.1000, etc.
+
+The optional keyword *delete* can be used to delete molecules below the
+molecular weight cutoff *mwcutoff* once they have been in that state
+for longer than *TAVcutoff* timesteps.
 
 ----------
 
